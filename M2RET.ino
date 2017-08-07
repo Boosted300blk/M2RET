@@ -34,7 +34,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include <due_wire.h>
 #include <SamNonDuePin.h>
 #include <SPI.h>
-#include <lin_stack.h>
+#include <kwpiso9141.h>
 #include <sw_can.h>
 #include "ELM327_Emulator.h"
 
@@ -73,8 +73,10 @@ FileStore FS;
 //INT = SWC_nINT = C16 = Digital pin 47
 SWcan SWCAN(78, 47);
 
-lin_stack LIN1(1, 0); // Sniffer
-lin_stack LIN2(2, 0); // Sniffer
+//lin_stack LIN1(1, 0); // Sniffer
+//lin_stack LIN2(2, 0); // Sniffer
+kwpiso9141 kwpiso_1(1);
+kwpiso9141 kwpiso_2(2);
 
 ELM327Emu elmEmulator;
 
@@ -100,7 +102,7 @@ void loadSettings()
         settings.version = EEPROM_VER;
         settings.appendFile = false;
         settings.CAN0Speed = 500000;
-        settings.CAN0_Enabled = true;
+        settings.CAN0_Enabled = false;
         settings.CAN1Speed = 500000;
         settings.CAN1_Enabled = false;
         settings.CAN0ListenOnly = false;
@@ -108,9 +110,9 @@ void loadSettings()
         settings.SWCAN_Enabled = false;
         settings.SWCANListenOnly = false; //TODO: Not currently respected or implemented.
         settings.SWCANSpeed = 33333;
-        settings.LIN_Enabled = false;
-        settings.LINSpeed = 19200;
-        sprintf((char *)settings.fileNameBase, "CANBUS");
+        settings.KWPISO_Enabled = true;
+        settings.KWPISOSpeed = 9600;
+        sprintf((char *)settings.fileNameBase, "KLINE");
         sprintf((char *)settings.fileNameExt, "TXT");
         settings.fileNum = 1;
         for (int i = 0; i < 3; i++) {
@@ -135,7 +137,7 @@ void loadSettings()
         }
         settings.fileOutputType = CRTD;
         settings.useBinarySerialComm = false;
-        settings.autoStartLogging = false;
+        settings.autoStartLogging = true;
         settings.logLevel = 1; //info
         settings.sysType = 0; //CANDUE as default
         settings.valid = 0; //not used right now
@@ -326,11 +328,13 @@ void setup()
         SerialUSB.println(settings.SWCANSpeed);
     }
 
-/*
-    if (settings.LIN_Enabled) {
-        LIN1.setSerial();
-        LIN2.setSerial();
-    } */
+
+    if (settings.KWPISO_Enabled) {
+        kwpiso_1.setSerial();        
+        kwpiso_2.setSerial();
+        updateBusloadLED(10);
+        delay(250);
+    } 
 /*
     for (int i = 0; i < 7; i++) {
         if (settings.CAN0Filters[i].enabled) {
@@ -594,6 +598,97 @@ void sendFrameToFile(CAN_FRAME &frame, int whichBus)
         Logger::fileRaw(buff, 2);
     }
 }
+void sendKWPISOToUSB(byte* KWPISOBuff,int KWPISOBuffLen)
+{
+    uint8_t buff[22];
+    uint8_t temp;
+
+    if (SysSettings.lawicelMode) {
+        if (SysSettings.lawicellExtendedMode) {
+            SerialUSB.print(micros());
+            SerialUSB.print(" - ");
+            SerialUSB.print(0, HEX);
+            SerialUSB.print(" S ");
+            for (int d = 0; d < KWPISOBuffLen; d++) {
+                SerialUSB.print(" ");
+                SerialUSB.print(KWPISOBuff[d], HEX);
+            }
+        }
+        else {
+            SerialUSB.print("t");
+            sprintf((char *)buff, "%03x", 0);
+            SerialUSB.print((char *)buff);
+            SerialUSB.print(KWPISOBuffLen);
+            for (int i = 0; i < KWPISOBuffLen; i++) {
+                sprintf((char *)buff, "%02x", KWPISOBuff[i]);
+                SerialUSB.print((char *)buff);
+            }
+            if (SysSettings.lawicelTimestamping) {
+                uint16_t timestamp = (uint16_t)millis();
+                sprintf((char *)buff, "%04x", timestamp);
+                SerialUSB.print((char *)buff);
+            }
+        }
+        SerialUSB.write(13);
+    } else {
+        if (settings.useBinarySerialComm) {
+            uint32_t now = micros();
+            serialBuffer[serialBufferLength++] = 0xF1;
+            serialBuffer[serialBufferLength++] = 0; //0 = canbus frame sending
+            serialBuffer[serialBufferLength++] = (uint8_t)(now & 0xFF);
+            serialBuffer[serialBufferLength++] = (uint8_t)(now >> 8);
+            serialBuffer[serialBufferLength++] = (uint8_t)(now >> 16);
+            serialBuffer[serialBufferLength++] = (uint8_t)(now >> 24);
+            serialBuffer[serialBufferLength++] = (uint8_t)(0 & 0xFF);
+            serialBuffer[serialBufferLength++] = (uint8_t)(0 >> 8);
+            serialBuffer[serialBufferLength++] = (uint8_t)(0 >> 16);
+            serialBuffer[serialBufferLength++] = (uint8_t)(0 >> 24);
+            serialBuffer[serialBufferLength++] = KWPISOBuffLen + (uint8_t)(0 << 4);
+            for (int c = 0; c < KWPISOBuffLen; c++) {
+                serialBuffer[serialBufferLength++] = KWPISOBuff[c];
+            }
+            //temp = checksumCalc(buff, 11 + frame.length);
+            temp = 0;
+            serialBuffer[serialBufferLength++] = temp;
+            //SerialUSB.write(buff, 12 + frame.length);
+        } else {
+            SerialUSB.print(micros());
+            SerialUSB.print(" - ");
+            SerialUSB.print(0, HEX);
+            SerialUSB.print(" S ");
+            SerialUSB.print(0);
+            SerialUSB.print(" ");
+            SerialUSB.print(KWPISOBuffLen);
+            for (int c = 0; c < KWPISOBuffLen; c++) {
+                SerialUSB.print(" ");
+                SerialUSB.print(KWPISOBuff[c], HEX);
+            }
+            SerialUSB.println();
+        }
+    }
+}
+
+// Max Size Is 255
+void sendKWPISOToFile(byte* KWPISOBuff,int KWPISOBuffLen)
+{
+    uint8_t buff[255];
+    if (settings.fileOutputType == BINARYFILE) {
+      // TODOB
+    } else if (settings.fileOutputType == GVRET) {
+      // TODOB
+    } else if (settings.fileOutputType == CRTD) {
+        sprintf((char *)buff, "%f", millis() / 1000.0f);
+        Logger::fileRaw(buff, strlen((char *)buff));
+
+        for (int i = 0; i < KWPISOBuffLen; i++) {
+            sprintf((char *) buff, " %x", KWPISOBuff[i]);
+            Logger::fileRaw(buff, strlen((char *)buff));
+        }
+        buff[0] = '\r';
+        buff[1] = '\n';
+        Logger::fileRaw(buff, 2);
+    } 
+}
 
 void processDigToggleFrame(CAN_FRAME &frame)
 {
@@ -669,7 +764,7 @@ void loop()
     int serialCnt;
     uint32_t now = micros();
 
-    if (millis() > (busLoadTimer + 250)) {
+    /*if (millis() > (busLoadTimer + 250)) {
         busLoadTimer = millis();
         busLoad[0].busloadPercentage = ((busLoad[0].busloadPercentage * 3) + (((busLoad[0].bitsSoFar * 1000) / busLoad[0].bitsPerQuarter) / 10)) / 4;
         busLoad[1].busloadPercentage = ((busLoad[1].busloadPercentage * 3) + (((busLoad[1].bitsSoFar * 1000) / busLoad[1].bitsPerQuarter) / 10)) / 4;
@@ -682,7 +777,7 @@ void loop()
         busLoad[1].bitsSoFar = 0;
         if (busLoad[0].busloadPercentage > busLoad[1].busloadPercentage) updateBusloadLED(busLoad[0].busloadPercentage);
         else updateBusloadLED(busLoad[1].busloadPercentage);
-    }
+    }*/
 
     /*if (SerialUSB)*/ isConnected = true;
 
@@ -721,6 +816,27 @@ void loop()
         if (SysSettings.logToFile) sendFrameToFile(incoming, 1);
     }
     
+    if(settings.KWPISO_Enabled)
+    {
+      byte KWPISO1Data[255];
+      byte KWPISO1DataSize = 255;
+      byte a = kwpiso_1.read(KWPISO1Data,&KWPISO1DataSize);
+      if(a == 1)
+      {
+        if(isConnected) sendKWPISOToUSB(KWPISO1Data,KWPISO1DataSize);
+        if(SysSettings.logToFile) sendKWPISOToFile(KWPISO1Data,KWPISO1DataSize); 
+      }
+      
+      if (millis() > (busLoadTimer + 250)) {
+        busLoadTimer = millis();
+        if(a == 1)
+          updateBusloadLED((KWPISO1DataSize/255*100));
+        else
+          updateBusloadLED(10); // Leave the led lit
+      }
+      
+    }    
+    
     if (SWCAN.GetRXFrame(swIncoming)) {
         //copy into our normal CAN struct so we can pretend and all existing functions can access the frame
         incoming.id = swIncoming.id;
@@ -732,7 +848,6 @@ void loop()
         //TODO: Maybe support digital toggle system on swcan too.
         if (SysSettings.logToFile) sendFrameToFile(incoming, 2);      
     }
-
     
     if (SysSettings.lawicelPollCounter > 0) SysSettings.lawicelPollCounter--;
     //}
